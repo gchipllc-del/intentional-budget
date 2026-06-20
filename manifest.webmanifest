@@ -1,0 +1,17 @@
+{
+  "name": "Intentional — 50/30/20 Budget",
+  "short_name": "Intentional",
+  "description": "A sleek 50/30/20 budgeting tracker. Plan income, needs, wants and savings, log spending, and watch your savings rate grow. All data stays on your device.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0c1c",
+  "theme_color": "#0a0c1c",
+  "categories": ["finance", "productivity", "lifestyle"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

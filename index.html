@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+  <title>Intentional · 50/30/20</title>
+  <meta name="description" content="A sleek 50/30/20 budgeting app — track income, needs, wants and savings, log spending, and watch your savings rate grow." />
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="theme-color" content="#0a0c1c" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#f4f5fb" media="(prefers-color-scheme: light)" />
+
+  <!-- iOS home-screen app -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Intentional" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <link rel="icon" href="icons/favicon-32.png" sizes="32x32" />
+  <link rel="icon" href="icons/favicon.png" sizes="64x64" />
+
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Top bar -->
+    <header class="topbar" id="topbar">
+      <button class="icon-btn" id="prevMonth" aria-label="Previous month">‹</button>
+      <button class="month-pill" id="monthPill" aria-label="Select month">
+        <span id="monthLabel">Month</span>
+        <span class="caret">▾</span>
+      </button>
+      <button class="icon-btn" id="nextMonth" aria-label="Next month">›</button>
+      <button class="icon-btn settings-btn" id="settingsBtn" aria-label="Settings">⚙</button>
+    </header>
+
+    <!-- Scrollable view -->
+    <main id="view" class="view"></main>
+
+    <!-- Bottom navigation -->
+    <nav class="tabbar" id="tabbar">
+      <button class="tab is-active" data-tab="budget">
+        <span class="tab-ico">◐</span><span>Budget</span>
+      </button>
+      <button class="fab" id="fab" aria-label="Add entry">+</button>
+      <button class="tab" data-tab="trends">
+        <span class="tab-ico">📈</span><span>Trends</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Sheet / modal mount point -->
+  <div id="sheetRoot"></div>
+  <div id="toastRoot"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
