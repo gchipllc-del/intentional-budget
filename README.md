@@ -4,6 +4,9 @@ A sleek, installable phone app (PWA) built from the *Intentional Spending Tracke
 Plan your income, **Needs (50%) / Wants (30%) / Savings (20%)**, log spending fast, and watch
 your savings rate trend over time.
 
+### 📱 Live app: **https://gchipllc-del.github.io/intentional-budget/**
+Open that on your phone and install it to your home screen (steps below).
+
 - **No accounts, no backend.** All data is stored *only on your device* (browser localStorage).
 - **Works offline** once installed.
 - **Installs to your home screen** on iPhone and Android with its own icon, full-screen.
