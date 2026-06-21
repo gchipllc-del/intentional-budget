@@ -63,7 +63,8 @@
   function defaultState() {
     return {
       v: 1,
-      settings: { currency: '$', targets: { needs: 0.5, wants: 0.3, savings: 0.2 }, theme: 'system', lastKind: 'needs' },
+      settings: { currency: '$', targets: { needs: 0.5, wants: 0.3, savings: 0.2 }, theme: 'system', lastKind: 'needs',
+        bank: { apiBase: '', token: '' } },
       current: thisMonthKey(),
       months: {},
     };
@@ -80,6 +81,7 @@
     s = s || {};
     s.settings = Object.assign({}, d.settings, s.settings || {});
     s.settings.targets = Object.assign({}, d.settings.targets, (s.settings && s.settings.targets) || {});
+    s.settings.bank = Object.assign({}, d.settings.bank, s.settings.bank || {});
     s.months = s.months || {};
     s.current = s.current || thisMonthKey();
     s.v = 1;
@@ -527,6 +529,20 @@
           ${themes.map((x) => `<button data-theme="${x}" class="${state.settings.theme === x ? 'on' : ''}">${x[0].toUpperCase() + x.slice(1)}</button>`).join('')}
         </div></div>
 
+      <div class="section-title" style="margin-left:0">Bank sync (beta)</div>
+      <p class="hint" style="text-align:left;margin:0 0 12px">Optional, read-only. Connects to <b>your own</b> backend (see <code>worker/README</code>) — never to me. It can read transactions but can never move money.</p>
+      <div class="field"><label>API URL</label>
+        <input id="bankApi" type="text" placeholder="https://intentional-budget-api.&lt;you&gt;.workers.dev" value="${esc((state.settings.bank || {}).apiBase || '')}" /></div>
+      <div class="field"><label>Access key</label>
+        <input id="bankKey" type="password" placeholder="your APP_SECRET" value="${esc((state.settings.bank || {}).token || '')}" /></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <button class="btn-ghost" id="bankTest" style="width:auto;padding:11px 16px;background:var(--card-2);border-radius:12px">Test</button>
+        <button class="btn-ghost" id="bankConnect" style="width:auto;padding:11px 16px;background:var(--card-2);border-radius:12px">Connect bank</button>
+        <button class="btn-ghost" id="bankSync" style="width:auto;padding:11px 16px;background:var(--card-2);border-radius:12px">Sync now</button>
+        <button class="btn-ghost btn-danger" id="bankDisconnect" style="width:auto;padding:11px 16px;background:var(--card-2);border-radius:12px">Disconnect</button>
+      </div>
+      <div class="hint" id="bankStatus" style="text-align:left;margin:0 0 4px">Not connected.</div>
+
       <div class="section-title" style="margin-left:0">Data</div>
       <div class="set-row"><span class="lbl">Export backup<small>Download all your data as a file</small></span>
         <button class="btn-ghost" id="expBtn" style="width:auto;padding:10px 16px;background:var(--card-2);border-radius:12px">Export</button></div>
@@ -560,6 +576,22 @@
       qa('#themeTog button').forEach((x) => x.classList.toggle('on', x === b));
       applyTheme(); saveNow();
     }));
+
+    // --- Bank sync (beta) ---
+    const bankApi = q('#bankApi'), bankKey = q('#bankKey'), bankStatus = q('#bankStatus');
+    const saveBank = () => {
+      state.settings.bank = state.settings.bank || {};
+      state.settings.bank.apiBase = bankApi.value.trim();
+      state.settings.bank.token = bankKey.value.trim();
+      save();
+    };
+    bankApi.addEventListener('input', saveBank);
+    bankKey.addEventListener('input', saveBank);
+    const setBankStatus = (msg) => { bankStatus.textContent = msg; };
+    q('#bankTest').addEventListener('click', () => runBank('test', setBankStatus));
+    q('#bankConnect').addEventListener('click', () => runBank('connect', setBankStatus));
+    q('#bankSync').addEventListener('click', () => runBank('sync', setBankStatus));
+    q('#bankDisconnect').addEventListener('click', () => runBank('disconnect', setBankStatus));
 
     q('#expBtn').addEventListener('click', exportData);
     q('#impBtn').addEventListener('click', () => q('#impFile').click());
@@ -598,6 +630,85 @@
       } catch (e) { toast('Could not read that file'); }
     };
     r.readAsText(file);
+  }
+
+  // ---------- bank sync (beta) ----------
+  async function bankFetch(path, opts) {
+    const c = state.settings.bank || {};
+    if (!c.apiBase || !c.token) throw new Error('Enter the API URL and access key first');
+    const res = await fetch(c.apiBase.replace(/\/+$/, '') + path, Object.assign({}, opts, {
+      headers: Object.assign({ Authorization: 'Bearer ' + c.token, 'Content-Type': 'application/json' }, (opts && opts.headers) || {}),
+    }));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data.error || ('HTTP ' + res.status)) + (data.code ? ' (' + data.code + ')' : ''));
+    return data;
+  }
+  function loadPlaid() {
+    return new Promise((resolve, reject) => {
+      if (window.Plaid) return resolve();
+      const s = document.createElement('script');
+      s.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('Could not load Plaid Link'));
+      document.head.appendChild(s);
+    });
+  }
+  // Replace this month's bank-sourced entries with freshly synced category totals.
+  function importBankSummary(summary) {
+    const m = activeMonth();
+    m.entries = m.entries.filter((e) => e.src !== 'bank');
+    const add = (kind, amt) => {
+      const v = Math.round((+amt || 0) * 100) / 100;
+      if (v > 0) m.entries.push({ id: uid(), kind, name: 'Synced from bank', amount: v, ts: Date.now(), src: 'bank' });
+    };
+    add('income', summary.income); add('needs', summary.needs);
+    add('wants', summary.wants); add('savings', summary.savings);
+    saveNow();
+  }
+  async function runBank(action, setStatus) {
+    try {
+      if (action === 'test') {
+        setStatus('Testing…');
+        const s = await bankFetch('/status', { method: 'GET' });
+        setStatus(`Connected (${s.env}). ${s.items.length} bank(s), ${s.transactions} transactions.${s.killed ? ' KILL SWITCH ON.' : ''}`);
+        toast('Connection OK');
+      } else if (action === 'connect') {
+        setStatus('Opening your bank…');
+        const t = await bankFetch('/link/token', { method: 'POST' });
+        await loadPlaid();
+        const handler = window.Plaid.create({
+          token: t.link_token,
+          onSuccess: async (public_token) => {
+            try {
+              const r = await bankFetch('/link/exchange', { method: 'POST', body: JSON.stringify({ public_token }) });
+              setStatus('Linked ' + (r.institution || 'bank') + '. Tap “Sync now”.');
+              toast('Bank connected');
+            } catch (e) { setStatus('Link failed: ' + e.message); }
+          },
+          onExit: () => setStatus('Link closed.'),
+        });
+        handler.open();
+      } else if (action === 'sync') {
+        setStatus('Syncing…');
+        const r = await bankFetch('/sync', { method: 'POST' });
+        const s = await bankFetch('/summary?month=' + encodeURIComponent(state.current), { method: 'GET' });
+        importBankSummary(s.summary);
+        closeSheet(); render();
+        toast(`Synced ${state.current} (+${r.added})`);
+      } else if (action === 'disconnect') {
+        if (!confirm('Disconnect all banks and purge synced data from your server?')) return;
+        setStatus('Disconnecting…');
+        await bankFetch('/disconnect', { method: 'POST' });
+        const m = activeMonth();
+        m.entries = m.entries.filter((e) => e.src !== 'bank');
+        saveNow();
+        setStatus('Disconnected. Synced data purged.');
+        toast('Disconnected');
+      }
+    } catch (e) {
+      setStatus('Error: ' + e.message);
+      toast(e.message);
+    }
   }
 
   // ---------- theme ----------

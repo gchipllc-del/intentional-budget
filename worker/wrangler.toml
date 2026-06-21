@@ -1,0 +1,19 @@
+name = "intentional-budget-api"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Cloudflare D1 (SQLite). For LOCAL dev the id is ignored; for deploy, replace
+# database_id with the value printed by:  npx wrangler d1 create intentional
+[[d1_databases]]
+binding = "DB"
+database_name = "intentional"
+database_id = "REPLACE_AFTER_d1_create"
+
+# Non-secret config. Flip PLAID_ENV to "production" once your Plaid Trial is approved.
+[vars]
+PLAID_ENV = "sandbox"
+ALLOWED_ORIGIN = "https://gchipllc-del.github.io"
+
+# SECRETS ARE NOT STORED HERE. Provide them via:
+#   local:  worker/.dev.vars   (gitignored)
+#   deploy: npx wrangler secret put PLAID_CLIENT_ID   (and PLAID_SECRET, APP_SECRET, ENC_KEY)

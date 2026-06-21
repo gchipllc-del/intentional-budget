@@ -1,0 +1,19 @@
+# Copy this file to ".dev.vars" (which is gitignored) and fill in real values.
+# NEVER commit real secrets. These are read automatically by `wrangler dev`.
+
+# From your Plaid dashboard (https://dashboard.plaid.com) -> Developers -> Keys.
+# Use your SANDBOX secret first. Switch to the production secret only for Phase 1.
+PLAID_CLIENT_ID="your_plaid_client_id"
+PLAID_SECRET="your_plaid_sandbox_secret"
+
+# A long random string the app sends as `Authorization: Bearer <APP_SECRET>`.
+# Generate:  openssl rand -hex 32
+APP_SECRET="generate_with_openssl_rand_hex_32"
+
+# Base64-encoded 32-byte key used to encrypt the Plaid access token before storage.
+# Generate:  openssl rand -base64 32
+ENC_KEY="generate_with_openssl_rand_base64_32"
+
+# Optional: allow http://localhost:4178 to call this worker from a browser during
+# local dev (the curl-based sandbox proof does NOT need this). Never set in production.
+# ALLOW_LOCALHOST="1"

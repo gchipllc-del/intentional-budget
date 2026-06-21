@@ -74,6 +74,14 @@ It now launches full-screen with its own icon, and works without internet.
 
 ---
 
+## Bank sync (optional, beta)
+By default the app is 100% manual and on-device. There's an **optional** read-only bank
+import you can enable by deploying your own backend — it can read transactions but can
+**never move money**, and the data lives on **your** Cloudflare account, not anyone else's.
+- Setup + the exact account/key steps: [`worker/README.md`](worker/README.md)
+- Why this design (providers, architecture, finance-grade security): [`BANK_SYNC_SCOPING.md`](BANK_SYNC_SCOPING.md)
+- Turn it on in the app under **⚙ Settings → Bank sync (beta)**.
+
 ## Updating the app later
 If you change any file, bump `CACHE` in `sw.js` (e.g. `intentional-v1` → `intentional-v2`)
 and re-deploy, so installed phones pick up the new version.
