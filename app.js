@@ -21,6 +21,9 @@
     savings: ['Emergency fund', 'Investments', 'Retirement', 'Extra debt payments'],
   };
   const STORE_KEY = 'intentional.v1';
+  // Declared here (not next to migrate) because `state = load()` runs at module-eval
+  // time and const declarations don't hoist — migrate() needs this already initialized.
+  const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
   // ---------- tiny helpers ----------
   const q = (s, r) => (r || document).querySelector(s);
@@ -35,7 +38,8 @@
     const s = a % 1 === 0
       ? a.toLocaleString('en-US')
       : a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    return (neg ? '-' : '') + state.settings.currency + s;
+    // esc: money() output lands in innerHTML everywhere; the currency symbol is user data.
+    return (neg ? '-' : '') + esc(state.settings.currency) + s;
   }
   const pad2 = (n) => String(n).padStart(2, '0');
   const thisMonthKey = () => { const d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1); };
@@ -76,26 +80,56 @@
     } catch (e) { /* ignore */ }
     return defaultState();
   }
+  // Everything loaded from localStorage or an imported backup file funnels through here.
+  // Imported files are UNTRUSTED input: clamp and coerce every value that can reach
+  // innerHTML or state logic, so a crafted backup can't inject markup or break the app.
   function migrate(s) {
     const d = defaultState();
     s = s || {};
     s.settings = Object.assign({}, d.settings, s.settings || {});
     s.settings.targets = Object.assign({}, d.settings.targets, (s.settings && s.settings.targets) || {});
     s.settings.bank = Object.assign({}, d.settings.bank, s.settings.bank || {});
-    s.months = s.months || {};
-    s.current = s.current || thisMonthKey();
+    s.settings.currency = String(s.settings.currency || '$').replace(/[<>&"']/g, '').slice(0, 3) || '$';
+    if (!ALL_KINDS.includes(s.settings.lastKind)) s.settings.lastKind = 'needs';
+    ['needs', 'wants', 'savings'].forEach((k) => { s.settings.targets[k] = +s.settings.targets[k] || 0; });
+    s.settings.bank.apiBase = String(s.settings.bank.apiBase || '');
+    s.settings.bank.token = String(s.settings.bank.token || '');
+    const months = {};
+    Object.keys(s.months || {}).forEach((k) => {
+      if (!MONTH_RE.test(k) || !s.months[k]) return;
+      const entries = Array.isArray(s.months[k].entries) ? s.months[k].entries : [];
+      months[k] = {
+        entries: entries.map((e) => Object.assign({
+          id: String((e && e.id) || uid()),
+          kind: ALL_KINDS.includes(e && e.kind) ? e.kind : 'needs',
+          name: String((e && e.name) || ''),
+          amount: +(e && e.amount) || 0,
+          ts: +(e && e.ts) || Date.now(),
+        }, (e && e.src === 'bank') ? { src: 'bank' } : {})),
+      };
+    });
+    s.months = months;
+    s.current = MONTH_RE.test(s.current) ? s.current : thisMonthKey();
     s.v = 1;
     return s;
   }
-  let saveTimer;
+  let saveTimer, saveWarned = false;
   function save() { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 120); }
-  function saveNow() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* quota */ } }
+  function saveNow() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+    catch (e) {
+      if (!saveWarned) { saveWarned = true; toast('Could not save — device storage is full or blocked'); }
+    }
+  }
 
   // ---------- month data ----------
   function templateEntries(key) {
     const prior = Object.keys(state.months).filter((k) => k < key).sort().pop();
     if (prior) {
-      return state.months[prior].entries.map((e) => ({ id: uid(), kind: e.kind, name: e.name, amount: e.amount, ts: Date.now() }));
+      // Bank-synced actuals are per-month facts, not recurring budget lines — carrying
+      // them forward would double-count once the new month syncs.
+      return state.months[prior].entries.filter((e) => e.src !== 'bank')
+        .map((e) => ({ id: uid(), kind: e.kind, name: e.name, amount: e.amount, ts: Date.now() }));
     }
     const out = [];
     ALL_KINDS.forEach((k) => DEFAULT_TEMPLATE[k].forEach((name) => out.push({ id: uid(), kind: k, name, amount: 0, ts: Date.now() })));
@@ -137,14 +171,18 @@
   // ============================================================
   //  RENDER
   // ============================================================
-  function render() {
+  function render(opts) {
     q('#monthLabel').textContent = keyToLabel(state.current);
     applyTheme();
-    qa('.tab').forEach((t) => t.classList.toggle('is-active', t.dataset.tab === tab));
+    qa('.tab').forEach((t) => {
+      const active = t.dataset.tab === tab;
+      t.classList.toggle('is-active', active);
+      if (active) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
+    });
     const view = q('#view');
     if (tab === 'budget') { view.innerHTML = budgetHTML(); wireBudget(); }
     else { view.innerHTML = trendsHTML(); wireTrends(); }
-    window.scrollTo(0, 0);
+    if (!(opts && opts.keepScroll)) window.scrollTo(0, 0);
     if (pendingFocus) {
       const el = q('[data-id="' + pendingFocus + '"] .item-name-input');
       if (el) { el.focus(); }
@@ -177,7 +215,7 @@
           </div>
           <div class="hero-status ${status.cls}" id="heroStatus">${status.text}</div>
         </div>
-        <div class="alloc-bar">${segs}<i class="alloc-seg" data-seg="left" style="width:${leftW}%;background:var(--line)"></i></div>
+        <div class="alloc-bar" aria-hidden="true">${segs}<i class="alloc-seg" data-seg="left" style="width:${leftW}%;background:var(--line)"></i></div>
         <div class="alloc-legend">${legend}</div>
       </div>`;
 
@@ -234,20 +272,20 @@
 
     const prog = isIncome ? '' : (() => {
       const p = progressInfo(kind, info, c.income);
-      return `<div class="cat-progress"><i data-prog="${kind}" style="width:${p.w}%;background:${p.color}"></i></div>`;
+      return `<div class="cat-progress" aria-hidden="true"><i data-prog="${kind}" style="width:${p.w}%;background:${p.color}"></i></div>`;
     })();
 
     const rows = items.map((e) => `
-      <div class="item-row" data-id="${e.id}">
-        <span class="item-name"><input class="item-name-input" type="text" value="${esc(e.name)}" placeholder="Name" /></span>
-        <input class="item-amt-input" type="text" inputmode="decimal" value="${e.amount ? esc(e.amount) : ''}" placeholder="0" />
+      <div class="item-row" data-id="${esc(e.id)}">
+        <span class="item-name"><input class="item-name-input" type="text" value="${esc(e.name)}" placeholder="Name" aria-label="Item name" /></span>
+        <input class="item-amt-input" type="text" inputmode="decimal" value="${e.amount ? esc(e.amount) : ''}" placeholder="0" aria-label="Amount" />
         <button class="item-del" aria-label="Delete">×</button>
       </div>`).join('');
 
     return `
       <div class="cat-card ${open ? 'open' : ''}" data-kind="${kind}">
-        <button class="cat-head" data-toggle="${kind}">
-          <span class="cat-icon ${meta.cls}">${meta.icon}</span>
+        <button class="cat-head" data-toggle="${kind}" aria-expanded="${open}">
+          <span class="cat-icon ${meta.cls}" aria-hidden="true">${meta.icon}</span>
           <span class="cat-meta">
             <span class="cat-name">${name}</span>
             <span class="cat-sub" data-sub="${kind}">${sub}</span>
@@ -256,7 +294,7 @@
             <span class="big" data-total="${kind}">${money(total)}</span>
             ${rightPct}
           </span>
-          <span class="cat-chevron">›</span>
+          <span class="cat-chevron" aria-hidden="true">›</span>
         </button>
         ${prog}
         <div class="items">
@@ -300,6 +338,7 @@
       const k = b.dataset.toggle;
       if (openCards.has(k)) openCards.delete(k); else openCards.add(k);
       q('.cat-card[data-kind="' + k + '"]').classList.toggle('open');
+      b.setAttribute('aria-expanded', String(openCards.has(k)));
     }));
     qa('.item-row[data-id]').forEach((row) => {
       const id = row.dataset.id;
@@ -311,7 +350,8 @@
         setEntry(id, { amount: v }); refreshComputed(); save();
       });
       const del = q('.item-del', row);
-      if (del) del.addEventListener('click', () => { delEntry(id); render(); });
+      // saveNow: delete is destructive and was the one mutation path that never persisted
+      if (del) del.addEventListener('click', () => { delEntry(id); saveNow(); render({ keepScroll: true }); });
     });
     qa('[data-add]').forEach((b) => b.addEventListener('click', () => {
       const kind = b.dataset.add;
@@ -320,7 +360,7 @@
       mm.entries.push(e);
       openCards.add(kind);
       pendingFocus = e.id;
-      saveNow(); render();
+      saveNow(); render({ keepScroll: true });
     }));
   }
 
@@ -351,7 +391,7 @@
 
     const stats = `
       <div class="stat-grid">
-        <div class="stat-card"><div class="v" style="color:var(--savings)">${pctText(avg)}</div><div class="k">Avg savings rate</div></div>
+        <div class="stat-card"><div class="v" style="color:var(--savings-text)">${pctText(avg)}</div><div class="k">Avg savings rate</div></div>
         <div class="stat-card"><div class="v">${pctText(best)}</div><div class="k">Best month</div></div>
         <div class="stat-card"><div class="v">${money(totalSaved)}</div><div class="k">Total saved</div></div>
       </div>`;
@@ -393,7 +433,7 @@
       <div class="section-title">All months</div>
       <div class="month-history">
         ${rows.slice().reverse().map((r) => `
-          <button class="mh-row" data-go="${r.key}" style="width:100%;text-align:left">
+          <button class="mh-row" data-go="${esc(r.key)}" style="width:100%;text-align:left">
             <span class="mh-when"><div class="m">${keyToLabel(r.key)}</div>
               <div class="s">${money(r.c.income)} income · ${money(r.c.allocated)} spent</div></span>
             <span class="mh-rate"><div class="r">${pctText(r.c.savingsRate)}</div><div class="l">saved</div></span>
@@ -437,25 +477,44 @@
   // ============================================================
   //  SHEETS (modals)
   // ============================================================
+  let lastFocus = null;
   function openSheet(html) {
+    lastFocus = document.activeElement;
     const root = q('#sheetRoot');
-    root.innerHTML = `<div class="scrim" data-close></div><div class="sheet" role="dialog" aria-modal="true"><div class="sheet-grip"></div>${html}</div>`;
+    root.innerHTML = `<div class="scrim" data-close></div><div class="sheet" role="dialog" aria-modal="true" tabindex="-1"><div class="sheet-grip" aria-hidden="true"></div>${html}</div>`;
     qa('[data-close]', root).forEach((el) => el.addEventListener('click', closeSheet));
+    const sheet = q('.sheet', root);
+    const h2 = q('h2', sheet);
+    if (h2) { h2.id = 'sheetTitle'; sheet.setAttribute('aria-labelledby', 'sheetTitle'); }
+    // Keep Tab inside the modal (aria-modal alone doesn't stop keyboard focus escaping).
+    sheet.addEventListener('keydown', (e) => {
+      if (e.key !== 'Tab') return;
+      const els = qa('button, input, select, a[href]', sheet).filter((el) => !el.disabled && el.offsetParent);
+      if (!els.length) return;
+      const first = els[0], last = els[els.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+    sheet.focus();
     return root;
   }
-  function closeSheet() { q('#sheetRoot').innerHTML = ''; }
+  function closeSheet() {
+    q('#sheetRoot').innerHTML = '';
+    if (lastFocus && typeof lastFocus.focus === 'function') lastFocus.focus();
+    lastFocus = null;
+  }
 
   function addSheet() {
     const last = state.settings.lastKind || 'needs';
     const segs = ALL_KINDS.map((k) =>
-      `<button data-k="${k}" class="${k === last ? 'on' : ''}"><span class="seg-dot" style="background:var(--${k === 'income' ? 'text-3' : k})"></span>${KIND_META[k].label}</button>`
+      `<button data-k="${k}" class="${k === last ? 'on' : ''}" aria-pressed="${k === last}"><span class="seg-dot" style="background:var(--${k === 'income' ? 'text-3' : k})" aria-hidden="true"></span>${KIND_META[k].label}</button>`
     ).join('');
     openSheet(`
       <h2>Add entry</h2>
       <p class="sub">Logs straight into ${keyToLabel(state.current)}.</p>
-      <div class="amount-field"><span class="cur">${esc(state.settings.currency)}</span>
-        <input id="addAmt" type="text" inputmode="decimal" placeholder="0" /></div>
-      <div class="field"><label>What was it?</label>
+      <div class="amount-field"><span class="cur" aria-hidden="true">${esc(state.settings.currency)}</span>
+        <input id="addAmt" type="text" inputmode="decimal" placeholder="0" aria-label="Amount" /></div>
+      <div class="field"><label for="addName">What was it?</label>
         <input id="addName" type="text" placeholder="e.g. Groceries, Rent, Coffee" /></div>
       <div class="field"><label>Category</label>
         <div class="segmented" id="addSeg">${segs}</div></div>
@@ -465,7 +524,11 @@
     let kind = last;
     qa('#addSeg button').forEach((b) => b.addEventListener('click', () => {
       kind = b.dataset.k;
-      qa('#addSeg button').forEach((x) => x.classList.toggle('on', x === b));
+      qa('#addSeg button').forEach((x) => {
+        const on = x === b;
+        x.classList.toggle('on', on);
+        x.setAttribute('aria-pressed', String(on));
+      });
     }));
     const amt = q('#addAmt'); setTimeout(() => amt.focus(), 120);
     const submit = () => {
@@ -489,7 +552,7 @@
     const list = keys.length
       ? keys.map((k) => {
           const c = compute(state.months[k].entries, state.settings.targets);
-          return `<button class="rl-item" data-go="${k}" style="width:100%;text-align:left">
+          return `<button class="rl-item" data-go="${esc(k)}" style="width:100%;text-align:left">
             <span class="rl-ico" style="background:var(--savings-soft)">📅</span>
             <span class="rl-main"><div class="rl-name">${keyToLabel(k)}${k === cur ? ' · current' : ''}</div>
               <div class="rl-sub">${money(c.income)} income · ${pctText(c.savingsRate)} saved</div></span>
@@ -512,14 +575,14 @@
     const themes = ['system', 'light', 'dark'];
     openSheet(`
       <h2>Settings</h2>
-      <div class="field" style="margin-top:8px"><label>Currency symbol</label>
+      <div class="field" style="margin-top:8px"><label for="setCur">Currency symbol</label>
         <input id="setCur" type="text" maxlength="3" value="${esc(state.settings.currency)}" /></div>
 
       <div class="field"><label>Target split</label>
         <div class="target-grid">
-          <div class="tg n"><label>Needs</label><input id="tN" type="text" inputmode="numeric" value="${Math.round(t.needs * 100)}"></div>
-          <div class="tg w"><label>Wants</label><input id="tW" type="text" inputmode="numeric" value="${Math.round(t.wants * 100)}"></div>
-          <div class="tg s"><label>Savings</label><input id="tS" type="text" inputmode="numeric" value="${Math.round(t.savings * 100)}"></div>
+          <div class="tg n"><label for="tN">Needs</label><input id="tN" type="text" inputmode="numeric" value="${Math.round(t.needs * 100)}"></div>
+          <div class="tg w"><label for="tW">Wants</label><input id="tW" type="text" inputmode="numeric" value="${Math.round(t.wants * 100)}"></div>
+          <div class="tg s"><label for="tS">Savings</label><input id="tS" type="text" inputmode="numeric" value="${Math.round(t.savings * 100)}"></div>
         </div>
         <div class="target-sum" id="tSum"></div>
       </div>
@@ -531,9 +594,9 @@
 
       <div class="section-title" style="margin-left:0">Bank sync (beta)</div>
       <p class="hint" style="text-align:left;margin:0 0 12px">Optional, read-only. Connects to <b>your own</b> backend (see <code>worker/README</code>) — never to me. It can read transactions but can never move money.</p>
-      <div class="field"><label>API URL</label>
-        <input id="bankApi" type="text" placeholder="https://intentional-budget-api.&lt;you&gt;.workers.dev" value="${esc((state.settings.bank || {}).apiBase || '')}" /></div>
-      <div class="field"><label>Access key</label>
+      <div class="field"><label for="bankApi">API URL</label>
+        <input id="bankApi" type="url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="https://intentional-budget-api.&lt;you&gt;.workers.dev" value="${esc((state.settings.bank || {}).apiBase || '')}" /></div>
+      <div class="field"><label for="bankKey">Access key</label>
         <input id="bankKey" type="password" placeholder="your APP_SECRET" value="${esc((state.settings.bank || {}).token || '')}" /></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <button class="btn-ghost" id="bankTest" style="width:auto;padding:11px 16px;background:var(--card-2);border-radius:12px">Test</button>
@@ -557,7 +620,10 @@
     `);
 
     const cur = q('#setCur');
-    cur.addEventListener('input', () => { state.settings.currency = cur.value.trim() || '$'; save(); });
+    cur.addEventListener('input', () => {
+      state.settings.currency = cur.value.replace(/[<>&"']/g, '').trim().slice(0, 3) || '$';
+      save();
+    });
 
     const tN = q('#tN'), tW = q('#tW'), tS = q('#tS'), tSum = q('#tSum');
     const refreshSum = () => {
@@ -587,7 +653,12 @@
     };
     bankApi.addEventListener('input', saveBank);
     bankKey.addEventListener('input', saveBank);
-    const setBankStatus = (msg) => { bankStatus.textContent = msg; };
+    // Re-resolve at call time: Plaid Link callbacks are long-lived and the sheet (and its
+    // captured #bankStatus node) may have been closed by then — fall back to a toast.
+    const setBankStatus = (msg) => {
+      const el = q('#bankStatus');
+      if (el) el.textContent = msg; else toast(msg);
+    };
     q('#bankTest').addEventListener('click', () => runBank('test', setBankStatus));
     q('#bankConnect').addEventListener('click', () => runBank('connect', setBankStatus));
     q('#bankSync').addEventListener('click', () => runBank('sync', setBankStatus));
@@ -655,14 +726,19 @@
   }
   // Replace this month's bank-sourced entries with freshly synced category totals.
   function importBankSummary(summary) {
+    // Guard BEFORE mutating: a failed/garbled response must never strip existing entries.
+    if (!summary || typeof summary !== 'object') throw new Error('Sync returned no data');
     const m = activeMonth();
     m.entries = m.entries.filter((e) => e.src !== 'bank');
-    const add = (kind, amt) => {
+    const add = (kind, amt, name) => {
       const v = Math.round((+amt || 0) * 100) / 100;
-      if (v > 0) m.entries.push({ id: uid(), kind, name: 'Synced from bank', amount: v, ts: Date.now(), src: 'bank' });
+      if (v > 0) m.entries.push({ id: uid(), kind, name, amount: v, ts: Date.now(), src: 'bank' });
     };
-    add('income', summary.income); add('needs', summary.needs);
-    add('wants', summary.wants); add('savings', summary.savings);
+    add('income', summary.income, 'Income (synced from bank)');
+    add('needs', summary.needs, 'Synced from bank');
+    add('wants', summary.wants, 'Synced from bank');
+    // "Contributed": withdrawals from savings aren't netted, so this is contributions, not net savings.
+    add('savings', summary.savings, 'Contributed to savings (synced)');
     saveNow();
   }
   async function runBank(action, setStatus) {
@@ -699,8 +775,8 @@
         if (!confirm('Disconnect all banks and purge synced data from your server?')) return;
         setStatus('Disconnecting…');
         await bankFetch('/disconnect', { method: 'POST' });
-        const m = activeMonth();
-        m.entries = m.entries.filter((e) => e.src !== 'bank');
+        // Purge bank rows from EVERY saved month, not just the one being viewed.
+        Object.values(state.months).forEach((m) => { m.entries = m.entries.filter((e) => e.src !== 'bank'); });
         saveNow();
         setStatus('Disconnected. Synced data purged.');
         toast('Disconnected');
@@ -736,8 +812,14 @@
     q('#monthPill').addEventListener('click', monthSheet);
     q('#settingsBtn').addEventListener('click', settingsSheet);
     q('#fab').addEventListener('click', addSheet);
-    qa('.tab').forEach((b) => b.addEventListener('click', () => { tab = b.dataset.tab; render(); }));
+    qa('.tab').forEach((b) => b.addEventListener('click', () => {
+      if (tab === b.dataset.tab) return; // same-tab tap: don't rebuild the view for nothing
+      tab = b.dataset.tab; render();
+    }));
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+    // Flush the debounced save before the OS freezes/kills the backgrounded PWA.
+    window.addEventListener('pagehide', saveNow);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveNow(); });
     render();
 
     if ('serviceWorker' in navigator) {

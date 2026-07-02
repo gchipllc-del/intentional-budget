@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS items (
   institution       TEXT,                    -- best-effort display name
   access_token_enc  TEXT NOT NULL,           -- AES-256-GCM ciphertext (base64), app-layer encrypted
   cursor            TEXT,                    -- transactions/sync cursor
+  error_code        TEXT,                    -- last Plaid error (e.g. ITEM_LOGIN_REQUIRED); NULL = healthy
   created_at        TEXT DEFAULT (datetime('now')),
   updated_at        TEXT
 );

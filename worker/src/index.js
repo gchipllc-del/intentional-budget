@@ -12,6 +12,7 @@
 //   GET  /transactions?month=YYYY-MM
 //   GET  /summary?month=YYYY-MM  -> {income,needs,wants,savings} totals
 //   POST /rules                  -> add a category rule + recategorize
+//   POST /transactions/bucket    -> manual per-txn bucket override (survives resync)
 //   POST /kill  /resume          -> soft kill switch (503 everything) / undo
 //   POST /disconnect             -> remove items at Plaid + purge all cached data
 
@@ -53,6 +54,7 @@ export default {
       if (path === '/transactions' && request.method === 'GET') return await getTransactions(url, env, cors);
       if (path === '/summary' && request.method === 'GET') return await getSummary(url, env, cors);
       if (path === '/rules' && request.method === 'POST') return await addRule(request, env, cors);
+      if (path === '/transactions/bucket' && request.method === 'POST') return await setBucket(request, env, cors);
       if (path === '/kill' && request.method === 'POST') return await setKilled(env, cors, true);
       if (path === '/resume' && request.method === 'POST') return await setKilled(env, cors, false);
       if (path === '/disconnect' && request.method === 'POST') return await disconnect(env, cors);
@@ -115,7 +117,7 @@ async function setKilled(env, cors, killed) {
 
 // ---------- endpoints ----------
 async function status(env, cors) {
-  const items = await env.DB.prepare('SELECT item_id, institution, updated_at FROM items').all();
+  const items = await env.DB.prepare('SELECT item_id, institution, updated_at, error_code FROM items').all();
   const tx = await env.DB.prepare('SELECT COUNT(*) AS c FROM transactions').first();
   return json({
     ok: true,
@@ -185,11 +187,12 @@ async function loadRules(env) {
   return r.results || [];
 }
 
-async function upsertTxn(env, rules, itemId, t) {
+// Build (don't run) the upsert so sync() can apply a whole Plaid page as one atomic batch.
+function upsertStmt(env, rules, itemId, t) {
   const primary = t.personal_finance_category ? t.personal_finance_category.primary : null;
   const detailed = t.personal_finance_category ? t.personal_finance_category.detailed : null;
   const cat = categorize(rules, t, primary, detailed);
-  await env.DB.prepare(
+  return env.DB.prepare(
     `INSERT INTO transactions
        (txn_id, item_id, date, name, merchant, amount, iso_currency, pfc_primary, pfc_detailed, bucket, bucket_source, pending)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -203,42 +206,67 @@ async function upsertTxn(env, rules, itemId, t) {
   ).bind(
     t.transaction_id, itemId, t.date, t.name || null, t.merchant_name || null,
     t.amount, t.iso_currency_code || 'USD', primary, detailed, cat.bucket, cat.source, t.pending ? 1 : 0
-  ).run();
+  );
 }
 
 async function sync(env, cors) {
   const items = await env.DB.prepare('SELECT item_id, access_token_enc, cursor FROM items').all();
   const rules = await loadRules(env);
-  let added = 0, modified = 0, removed = 0;
+  let added = 0, modified = 0, removed = 0, partial = false;
+  const itemErrors = [];
   for (const it of (items.results || [])) {
-    const token = await decryptToken(env, it.access_token_enc);
-    let cursor = it.cursor || null;
-    let hasMore = true;
-    let guard = 0;
-    while (hasMore && guard++ < 50) {
-      const res = await plaid(env, '/transactions/sync', cursor ? { access_token: token, cursor } : { access_token: token });
-      for (const t of (res.added || [])) { await upsertTxn(env, rules, it.item_id, t); added++; }
-      for (const t of (res.modified || [])) { await upsertTxn(env, rules, it.item_id, t); modified++; }
-      for (const t of (res.removed || [])) {
-        await env.DB.prepare('DELETE FROM transactions WHERE txn_id=?').bind(t.transaction_id).run();
-        removed++;
+    // One broken item (e.g. ITEM_LOGIN_REQUIRED after a bank forces re-auth) must not
+    // block the others: record its error on the item row and keep going.
+    try {
+      const token = await decryptToken(env, it.access_token_enc);
+      let cursor = it.cursor || null;
+      let hasMore = true;
+      let guard = 0, restarts = 0;
+      while (hasMore && guard++ < 50) {
+        let res;
+        try {
+          res = await plaid(env, '/transactions/sync', cursor ? { access_token: token, cursor } : { access_token: token });
+        } catch (e) {
+          // Plaid documents this as EXPECTED during long paginations; required handling
+          // is a restart from the item's original cursor (upserts are idempotent).
+          if (e && e.plaidCode === 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION' && restarts++ < 3) {
+            cursor = it.cursor || null;
+            continue;
+          }
+          throw e;
+        }
+        const stmts = [];
+        for (const t of (res.added || [])) { stmts.push(upsertStmt(env, rules, it.item_id, t)); added++; }
+        for (const t of (res.modified || [])) { stmts.push(upsertStmt(env, rules, it.item_id, t)); modified++; }
+        for (const t of (res.removed || [])) {
+          stmts.push(env.DB.prepare('DELETE FROM transactions WHERE txn_id=?').bind(t.transaction_id));
+          removed++;
+        }
+        if (stmts.length) await env.DB.batch(stmts); // one atomic batch per page, not per txn
+        cursor = res.next_cursor;
+        hasMore = !!res.has_more;
       }
-      cursor = res.next_cursor;
-      hasMore = !!res.has_more;
+      if (hasMore) partial = true; // hit the pagination guard with pages left
+      await env.DB.prepare("UPDATE items SET cursor=?, updated_at=datetime('now'), error_code=NULL WHERE item_id=?")
+        .bind(cursor, it.item_id).run();
+    } catch (e) {
+      const code = (e && e.plaidCode) || 'ERROR';
+      itemErrors.push({ item_id: it.item_id, code });
+      await env.DB.prepare('UPDATE items SET error_code=? WHERE item_id=?').bind(code, it.item_id).run();
     }
-    await env.DB.prepare("UPDATE items SET cursor=?, updated_at=datetime('now') WHERE item_id=?").bind(cursor, it.item_id).run();
   }
-  await audit(env, 'sync', `+${added} ~${modified} -${removed}`);
-  return json({ ok: true, added, modified, removed }, 200, cors);
+  await audit(env, 'sync', `+${added} ~${modified} -${removed}${partial ? ' partial' : ''}${itemErrors.length ? ` item_errors=${itemErrors.length}` : ''}`);
+  return json({ ok: true, added, modified, removed, partial, itemErrors }, 200, cors);
 }
 
 async function getTransactions(url, env, cors) {
   const month = url.searchParams.get('month');
   if (month && !validMonth(month)) return json({ error: 'bad_month' }, 400, cors);
+  // BETWEEN on zero-padded YYYY-MM-DD uses idx_txn_date; LIKE-prefix would full-scan on D1.
   const sql = month
-    ? 'SELECT txn_id,date,name,merchant,amount,iso_currency,pfc_primary,bucket,bucket_source,pending FROM transactions WHERE date LIKE ? ORDER BY date DESC'
+    ? 'SELECT txn_id,date,name,merchant,amount,iso_currency,pfc_primary,bucket,bucket_source,pending FROM transactions WHERE date BETWEEN ? AND ? ORDER BY date DESC'
     : 'SELECT txn_id,date,name,merchant,amount,iso_currency,pfc_primary,bucket,bucket_source,pending FROM transactions ORDER BY date DESC LIMIT 200';
-  const stmt = month ? env.DB.prepare(sql).bind(month + '%') : env.DB.prepare(sql);
+  const stmt = month ? env.DB.prepare(sql).bind(month + '-01', month + '-31') : env.DB.prepare(sql);
   const rows = await stmt.all();
   return json({ month: month || null, transactions: rows.results || [] }, 200, cors);
 }
@@ -247,15 +275,17 @@ async function getSummary(url, env, cors) {
   const month = url.searchParams.get('month');
   if (month && !validMonth(month)) return json({ error: 'bad_month' }, 400, cors);
   const sql = month
-    ? 'SELECT bucket, SUM(amount) AS total, COUNT(*) AS c FROM transactions WHERE date LIKE ? GROUP BY bucket'
+    ? 'SELECT bucket, SUM(amount) AS total, COUNT(*) AS c FROM transactions WHERE date BETWEEN ? AND ? GROUP BY bucket'
     : 'SELECT bucket, SUM(amount) AS total, COUNT(*) AS c FROM transactions GROUP BY bucket';
-  const stmt = month ? env.DB.prepare(sql).bind(month + '%') : env.DB.prepare(sql);
+  const stmt = month ? env.DB.prepare(sql).bind(month + '-01', month + '-31') : env.DB.prepare(sql);
   const rows = await stmt.all();
   // Plaid amounts: positive = money out (spending), negative = money in (income/deposits).
   const out = { income: 0, needs: 0, wants: 0, savings: 0, ignore: 0 };
   for (const r of (rows.results || [])) {
     const total = r.total || 0;
-    if (r.bucket === 'income') out.income += Math.abs(total);
+    // Negate (not abs): a month whose income bucket nets positive (clawback > deposits)
+    // must report negative income truthfully, not fabricate it.
+    if (r.bucket === 'income') out.income += -total;
     else if (out[r.bucket] !== undefined) out[r.bucket] += total;
   }
   return json({ month: month || null, summary: out }, 200, cors);
@@ -281,6 +311,21 @@ async function addRule(request, env, cors) {
   if (stmts.length) await env.DB.batch(stmts);
   await audit(env, 'rule_added', `${match_type}:${mv}=>${bucket}`);
   return json({ ok: true, recategorized: stmts.length }, 200, cors);
+}
+
+// Manual per-transaction override; survives resync via the ON CONFLICT manual-preservation CASE.
+async function setBucket(request, env, cors) {
+  const body = await request.json().catch(() => ({}));
+  const txnId = body.txn_id == null ? '' : String(body.txn_id);
+  const { bucket } = body;
+  if (!txnId || txnId.length > 100 || !['needs', 'wants', 'savings', 'income', 'ignore'].includes(bucket)) {
+    return json({ error: 'invalid_bucket' }, 400, cors);
+  }
+  const r = await env.DB.prepare("UPDATE transactions SET bucket=?, bucket_source='manual' WHERE txn_id=?")
+    .bind(bucket, txnId).run();
+  const changed = !!(r && r.meta && (r.meta.changes === undefined || r.meta.changes > 0));
+  await audit(env, 'bucket_manual', `${txnId}=>${bucket}`);
+  return json({ ok: true, changed }, 200, cors);
 }
 
 async function disconnect(env, cors) {

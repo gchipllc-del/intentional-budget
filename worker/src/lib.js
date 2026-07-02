@@ -102,17 +102,25 @@ export function defaultBucket(primary, detailed) {
 
   // Money moved into savings/investment/retirement = the "20".
   if (d === 'TRANSFER_OUT_SAVINGS' || d === 'TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS') return 'savings';
+  // A credit-card payment is the transfer leg of purchases already bucketed individually
+  // (when the card is linked) — counting it as spend double-counts the same dollars.
+  if (d === 'LOAN_PAYMENTS_CREDIT_CARD_PAYMENT') return 'ignore';
   // Groceries are a need; restaurants/bars/coffee fall through to wants.
   if (d === 'FOOD_AND_DRINK_GROCERIES') return 'needs';
-  // Insurance is a need; other general services fall through to wants.
-  if (d === 'GENERAL_SERVICES_INSURANCE') return 'needs';
+  // Non-discretionary GENERAL_SERVICES subtypes; the rest fall through to wants.
+  if (['GENERAL_SERVICES_INSURANCE', 'GENERAL_SERVICES_CHILDCARE',
+       'GENERAL_SERVICES_EDUCATION', 'GENERAL_SERVICES_AUTOMOTIVE'].includes(d)) return 'needs';
+  // Taxes are not discretionary; donations/agency fees stay wants.
+  if (d === 'GOVERNMENT_AND_NON_PROFIT_TAX_PAYMENT') return 'needs';
 
   if (p === 'INCOME') return 'income';
-  if (['RENT_AND_UTILITIES', 'TRANSPORTATION', 'MEDICAL', 'LOAN_PAYMENTS'].includes(p)) return 'needs';
+  // Bank fees (overdraft, NSF, card interest) are real money gone — exactly the bleed a
+  // budget should expose — so they count as needs rather than vanishing as transfers.
+  if (['RENT_AND_UTILITIES', 'TRANSPORTATION', 'MEDICAL', 'LOAN_PAYMENTS', 'BANK_FEES'].includes(p)) return 'needs';
   if (['ENTERTAINMENT', 'FOOD_AND_DRINK', 'GENERAL_MERCHANDISE', 'PERSONAL_CARE', 'TRAVEL',
        'HOME_IMPROVEMENT', 'GOVERNMENT_AND_NON_PROFIT', 'GENERAL_SERVICES'].includes(p)) return 'wants';
-  // Generic transfers and bank fees are not budget spending until the user rules them.
-  if (['TRANSFER_IN', 'TRANSFER_OUT', 'BANK_FEES'].includes(p)) return 'ignore';
+  // Generic transfers are account-to-account moves, not budget spending, until the user rules them.
+  if (['TRANSFER_IN', 'TRANSFER_OUT'].includes(p)) return 'ignore';
 
   return 'wants';
 }

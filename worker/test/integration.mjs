@@ -170,4 +170,125 @@ await check('disconnect with no items purges + returns ok', async () => {
   assert.equal(c.c, 0);
 });
 
+// ---------------------------------------------------------------------------
+// sync() coverage — Plaid HTTP layer stubbed via globalThis.fetch.
+// ---------------------------------------------------------------------------
+const { encryptToken } = await import('../src/lib.js');
+const env2 = { ...env, PLAID_CLIENT_ID: 'cid', PLAID_SECRET: 'sec' };
+const req2 = (path, opts = {}) => worker.fetch(new Request(base + path, opts), env2);
+const realFetch = globalThis.fetch;
+
+function stubPlaid(handler) {
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    if (!u.includes('plaid.com')) throw new Error('unexpected fetch: ' + u);
+    const body = JSON.parse(opts.body);
+    const out = handler(u, body);
+    return new Response(JSON.stringify(out.body), { status: out.status || 200, headers: { 'content-type': 'application/json' } });
+  };
+}
+const ptxn = (id, date, amount, primary, detailed, name) => ({
+  transaction_id: id, date, amount, name: name || id, merchant_name: null,
+  iso_currency_code: 'USD', pending: false,
+  personal_finance_category: { primary, detailed },
+});
+async function seedItem(id, token) {
+  const enc = await encryptToken(env2, token);
+  db.prepare('INSERT INTO items (item_id, access_token_enc, cursor) VALUES (?, ?, NULL)').run(id, enc);
+}
+const clearBank = () => { db.prepare('DELETE FROM items').run(); db.prepare('DELETE FROM transactions').run(); };
+
+await check('sync: 2-page pagination upserts rows, persists final cursor, preserves manual bucket, applies removals', async () => {
+  clearBank();
+  await seedItem('itA', 'tokA');
+  // Pre-existing manual override that page 1 will re-deliver as modified.
+  db.prepare("INSERT INTO transactions (txn_id,item_id,date,name,amount,iso_currency,bucket,bucket_source,pending) VALUES ('m1','itA','2026-06-02','Vanguard Transfer',500,'USD','savings','manual',0)").run();
+  stubPlaid((u, body) => {
+    assert.ok(u.endsWith('/transactions/sync'));
+    if (!body.cursor) return { body: {
+      added: [ptxn('p1', '2026-06-03', 40, 'FOOD_AND_DRINK', 'FOOD_AND_DRINK_RESTAURANT'),
+              ptxn('p2', '2026-06-04', 900, 'RENT_AND_UTILITIES', 'RENT_AND_UTILITIES_RENT')],
+      modified: [ptxn('m1', '2026-06-02', 500, 'TRANSFER_OUT', 'TRANSFER_OUT_OTHER_TRANSFER_OUT')],
+      removed: [], next_cursor: 'c1', has_more: true } };
+    assert.equal(body.cursor, 'c1');
+    return { body: { added: [ptxn('p3', '2026-06-05', 25, 'ENTERTAINMENT', 'ENTERTAINMENT_TV_AND_MOVIES')],
+      modified: [], removed: [{ transaction_id: 'p1' }], next_cursor: 'c2', has_more: false } };
+  });
+  const r = await req2('/sync', { method: 'POST', headers: AUTH });
+  const b = await r.json();
+  assert.equal(r.status, 200);
+  assert.equal(b.added, 3); assert.equal(b.modified, 1); assert.equal(b.removed, 1);
+  assert.equal(b.partial, false); assert.deepEqual(b.itemErrors, []);
+  assert.equal(db.prepare('SELECT cursor, error_code FROM items WHERE item_id=?').get('itA').cursor, 'c2');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM transactions WHERE txn_id=?').get('p1').c, 0); // removed
+  assert.equal(db.prepare('SELECT bucket FROM transactions WHERE txn_id=?').get('p2').bucket, 'needs');
+  const m1 = db.prepare('SELECT bucket, bucket_source FROM transactions WHERE txn_id=?').get('m1');
+  assert.equal(m1.bucket, 'savings'); assert.equal(m1.bucket_source, 'manual'); // resync didn't clobber
+});
+
+await check('sync: MUTATION_DURING_PAGINATION restarts from the original cursor', async () => {
+  clearBank();
+  await seedItem('itB', 'tokB');
+  db.prepare("UPDATE items SET cursor='orig' WHERE item_id='itB'").run();
+  let calls = 0;
+  stubPlaid((u, body) => {
+    calls++;
+    if (calls === 1) {
+      assert.equal(body.cursor, 'orig');
+      return { status: 400, body: { error_code: 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION' } };
+    }
+    assert.equal(body.cursor, 'orig'); // restarted from the ORIGINAL cursor, not a partial one
+    return { body: { added: [ptxn('b1', '2026-06-06', 60, 'TRANSPORTATION', 'TRANSPORTATION_GAS')],
+      modified: [], removed: [], next_cursor: 'bc2', has_more: false } };
+  });
+  const r = await req2('/sync', { method: 'POST', headers: AUTH });
+  const b = await r.json();
+  assert.equal(r.status, 200); assert.equal(b.added, 1); assert.deepEqual(b.itemErrors, []);
+  assert.equal(calls, 2);
+  assert.equal(db.prepare("SELECT cursor FROM items WHERE item_id='itB'").get().cursor, 'bc2');
+});
+
+await check('sync: one broken item (ITEM_LOGIN_REQUIRED) is isolated; healthy items still sync', async () => {
+  clearBank();
+  await seedItem('itC1', 'tokC1');
+  await seedItem('itC2', 'tokC2');
+  stubPlaid((u, body) => {
+    if (body.access_token === 'tokC1') return { status: 400, body: { error_code: 'ITEM_LOGIN_REQUIRED' } };
+    return { body: { added: [ptxn('c2t', '2026-06-07', 80, 'PERSONAL_CARE', 'PERSONAL_CARE_HAIR_AND_BEAUTY')],
+      modified: [], removed: [], next_cursor: 'cc', has_more: false } };
+  });
+  const r = await req2('/sync', { method: 'POST', headers: AUTH });
+  const b = await r.json();
+  assert.equal(r.status, 200);
+  assert.deepEqual(b.itemErrors, [{ item_id: 'itC1', code: 'ITEM_LOGIN_REQUIRED' }]);
+  assert.equal(b.added, 1);
+  assert.equal(db.prepare("SELECT error_code FROM items WHERE item_id='itC1'").get().error_code, 'ITEM_LOGIN_REQUIRED');
+  assert.equal(db.prepare("SELECT error_code FROM items WHERE item_id='itC2'").get().error_code, null);
+  // /status surfaces the error so the UI can prompt a re-link
+  const s = await (await req2('/status', { headers: AUTH })).json();
+  assert.equal(s.items.find((i) => i.item_id === 'itC1').error_code, 'ITEM_LOGIN_REQUIRED');
+});
+
+await check('POST /transactions/bucket sets a manual override; invalid bucket -> 400', async () => {
+  const r = await req2('/transactions/bucket', { method: 'POST', headers: AUTH, body: JSON.stringify({ txn_id: 'c2t', bucket: 'needs' }) });
+  assert.equal(r.status, 200); assert.equal((await r.json()).changed, true);
+  const row = db.prepare("SELECT bucket, bucket_source FROM transactions WHERE txn_id='c2t'").get();
+  assert.equal(row.bucket, 'needs'); assert.equal(row.bucket_source, 'manual');
+  const bad = await req2('/transactions/bucket', { method: 'POST', headers: AUTH, body: JSON.stringify({ txn_id: 'c2t', bucket: 'bogus' }) });
+  assert.equal(bad.status, 400);
+});
+
+await check('summary income negates (not abs): a clawback reduces income', async () => {
+  clearBank();
+  const ins = (id, date, amount, bucket) => db.prepare(
+    'INSERT INTO transactions (txn_id,item_id,date,name,amount,iso_currency,bucket,bucket_source,pending) VALUES (?,?,?,?,?,?,?,?,0)'
+  ).run(id, 'it1', date, id, amount, 'USD', bucket, 'auto');
+  ins('i1', '2026-07-01', -2500, 'income'); // deposit
+  ins('i2', '2026-07-15', 100, 'income');   // payroll clawback (money out of the income bucket)
+  const b = await (await req2('/summary?month=2026-07', { headers: AUTH })).json();
+  assert.equal(b.summary.income, 2400); // 2500 - 100, not 2600
+});
+
+globalThis.fetch = realFetch;
+
 console.log(`\nALL PASSED — ${passed} handler checks`);

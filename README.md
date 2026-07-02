@@ -83,8 +83,9 @@ import you can enable by deploying your own backend — it can read transactions
 - Turn it on in the app under **⚙ Settings → Bank sync (beta)**.
 
 ## Updating the app later
-If you change any file, bump `CACHE` in `sw.js` (e.g. `intentional-v1` → `intentional-v2`)
-and re-deploy, so installed phones pick up the new version.
+Just push — the service worker uses stale-while-revalidate, so installed phones pick up
+any deploy automatically (at most one launch behind). Bumping `CACHE` in `sw.js` is only
+needed as an emergency full reset.
 
 > The preview/demo currently has sample data in it. On a fresh install it starts empty.
 > To wipe sample data: **Settings → Erase everything**.

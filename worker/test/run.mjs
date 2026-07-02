@@ -71,12 +71,21 @@ ok('rent -> needs', defaultBucket('RENT_AND_UTILITIES', 'RENT_AND_UTILITIES_RENT
 ok('groceries -> needs', defaultBucket('FOOD_AND_DRINK', 'FOOD_AND_DRINK_GROCERIES') === 'needs');
 ok('restaurant -> wants', defaultBucket('FOOD_AND_DRINK', 'FOOD_AND_DRINK_RESTAURANT') === 'wants');
 ok('insurance -> needs', defaultBucket('GENERAL_SERVICES', 'GENERAL_SERVICES_INSURANCE') === 'needs');
-ok('other general service -> wants', defaultBucket('GENERAL_SERVICES', 'GENERAL_SERVICES_OTHER') === 'wants');
+ok('childcare -> needs', defaultBucket('GENERAL_SERVICES', 'GENERAL_SERVICES_CHILDCARE') === 'needs');
+ok('education -> needs', defaultBucket('GENERAL_SERVICES', 'GENERAL_SERVICES_EDUCATION') === 'needs');
+ok('car repair -> needs', defaultBucket('GENERAL_SERVICES', 'GENERAL_SERVICES_AUTOMOTIVE') === 'needs');
+ok('other general service -> wants', defaultBucket('GENERAL_SERVICES', 'GENERAL_SERVICES_OTHER_GENERAL_SERVICES') === 'wants');
 ok('entertainment -> wants', defaultBucket('ENTERTAINMENT', 'ENTERTAINMENT_TV_AND_MOVIES') === 'wants');
 ok('savings transfer -> savings', defaultBucket('TRANSFER_OUT', 'TRANSFER_OUT_SAVINGS') === 'savings');
 ok('investment transfer -> savings', defaultBucket('TRANSFER_OUT', 'TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS') === 'savings');
 ok('income -> income', defaultBucket('INCOME', 'INCOME_WAGES') === 'income');
-ok('generic transfer -> ignore', defaultBucket('TRANSFER_OUT', 'TRANSFER_OUT_OTHER') === 'ignore');
+ok('generic transfer -> ignore', defaultBucket('TRANSFER_OUT', 'TRANSFER_OUT_OTHER_TRANSFER_OUT') === 'ignore');
+ok('credit card payment -> ignore (transfer leg)', defaultBucket('LOAN_PAYMENTS', 'LOAN_PAYMENTS_CREDIT_CARD_PAYMENT') === 'ignore');
+ok('car payment -> needs', defaultBucket('LOAN_PAYMENTS', 'LOAN_PAYMENTS_CAR_PAYMENT') === 'needs');
+ok('tax payment -> needs', defaultBucket('GOVERNMENT_AND_NON_PROFIT', 'GOVERNMENT_AND_NON_PROFIT_TAX_PAYMENT') === 'needs');
+ok('donation -> wants', defaultBucket('GOVERNMENT_AND_NON_PROFIT', 'GOVERNMENT_AND_NON_PROFIT_DONATIONS') === 'wants');
+ok('overdraft fee -> needs', defaultBucket('BANK_FEES', 'BANK_FEES_OVERDRAFT_FEES') === 'needs');
+ok('cc interest -> needs', defaultBucket('BANK_FEES', 'BANK_FEES_INTEREST_CHARGE') === 'needs');
 ok('unknown -> wants fallback', defaultBucket('SOMETHING_NEW', '') === 'wants');
 ok('null -> wants fallback', defaultBucket(null, null) === 'wants');
 
